@@ -2,6 +2,7 @@
     await cb.message.edit_text(text, reply_markup=make_payment_kb(prod_id), parse_mode="Markdown")
     await cb.answer()
 
+
 @router.callback_query(F.data.startswith(CB_PAID_PREFIX))
 async def on_paid_clicked(cb: CallbackQuery, state: FSMContext):
     prod_id = cb.data.split(":", 1)[1]
@@ -20,6 +21,7 @@ async def on_paid_clicked(cb: CallbackQuery, state: FSMContext):
         parse_mode="Markdown",
     )
     await cb.answer()
+
 
 @router.message(ExpectReceipt.waiting, F.photo | F.document | F.text)
 async def on_receipt(msg: Message, state: FSMContext, bot: Bot):
@@ -81,13 +83,15 @@ async def on_receipt(msg: Message, state: FSMContext, bot: Bot):
     )
     await state.clear()
 
+
 # ---- Admin onay/red ----
 @router.callback_query(F.data.startswith("admin_ok:"))
 async def admin_approve(cb: CallbackQuery, bot: Bot):
     order_id = cb.data.split(":", 1)[1]
     order = ORDERS.get(order_id)
     if not order:
-        await cb.answer("Sipariş bulunamadı.", show_alert=True); return
+        await cb.answer("Sipariş bulunamadı.", show_alert=True)
+        return
 
     order["status"] = "APPROVED"
     try:
@@ -104,12 +108,14 @@ async def admin_approve(cb: CallbackQuery, bot: Bot):
     await cb.message.edit_text(new_text or "APPROVED", parse_mode="Markdown")
     await cb.answer("Onaylandı.")
 
+
 @router.callback_query(F.data.startswith("admin_no:"))
 async def admin_reject(cb: CallbackQuery, bot: Bot):
     order_id = cb.data.split(":", 1)[1]
     order = ORDERS.get(order_id)
     if not order:
-        await cb.answer("Sipariş bulunamadı.", show_alert=True); return
+        await cb.answer("Sipariş bulunamadı.", show_alert=True)
+        return
 
     order["status"] = "REJECTED"
     try:
@@ -125,6 +131,7 @@ async def admin_reject(cb: CallbackQuery, bot: Bot):
     new_text = (cb.message.text or "").replace("Durum: *PENDING*", "Durum: *REJECTED*")
     await cb.message.edit_text(new_text or "REJECTED", parse_mode="Markdown")
     await cb.answer("Reddedildi.")
+
 
 # --------- Main ---------
 async def main() -> None:
@@ -154,6 +161,7 @@ async def main() -> None:
     except Exception as e:
         logging.exception(f"start_polling istisna verdi: {e}")
         raise
+
 
 if __name__ == "__main__":
     try:
