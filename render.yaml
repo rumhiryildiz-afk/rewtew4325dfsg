@@ -1,0 +1,23 @@
+services:
+  - type: worker
+    name: mushbot
+    env: python
+    region: oregon
+    plan: starter
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: CRYPTO_ADDRESS
+        sync: false
+      - key: NOTIFY_CHANNEL_INTERACTIONS_ID   # Etkileşimler kanalı
+        sync: false
+      - key: NOTIFY_CHANNEL_PAYMENTS_ID       # Ödemeler kanalı
+        sync: false
+      # opsiyonel katalog görseli:
+      - key: KATALOG_IMAGE_FILE_ID
+        sync: false
+      - key: KATALOG_IMAGE_URL
+        sync: false
