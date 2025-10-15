@@ -1,18 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MushBot — tek dosya Telegram botu (aiogram v3, 3.7+ uyumlu)
-
-KULLANIM:
-- Ortam değişkenleri:
-    BOT_TOKEN (zorunlu)
-    CRYPTO_ADDRESS (zorunlu)
-    NOTIFY_CHANNEL_INTERACTIONS_ID (ör: -100...)
-    NOTIFY_CHANNEL_PAYMENTS_ID (ör: -100...)
-    KATALOG_IMAGE_FILE_ID / KATALOG_IMAGE_URL (opsiyonel)
-
-- Start: python bot.py
-- requirements.txt: aiogram==3.*
+MushBot - tek dosya Telegram botu (aiogram v3, 3.7+ uyumlu)
 """
 
 import asyncio
@@ -25,7 +14,6 @@ from typing import Any, Dict, List, Optional, Set
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import SkipHandler
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -182,36 +170,6 @@ def kb_payment(prod_id: str) -> InlineKeyboardMarkup:
     kb.button(text="⬅️ Geri", callback_data=CB_BACK_SHOP)
     kb.adjust(1)
     return kb.as_markup()
-
-# ---------- Global gate (düzeltildi: SkipHandler kullanılıyor) ----------
-@router.message()
-async def gate_messages(msg: Message):
-    """
-    Bu handler aiogram'ın önceki davranışına göre 'first match wins' etkisi
-    gösterebilir; bu yüzden burada yalnızca kilit (IS_LOCKED) kontrolü yaparız.
-    Eğer komut /yoladevam veya /mola369 ise SkipHandler fırlatılır ki
-    diğer handler'lar çalışsın. Kilitliyken diğer mesajlar sessizce yutulur.
-    """
-    text = (msg.text or "").strip()
-    # bu iki komut diğer handlerlara geçsin
-    if text.startswith("/yoladevam") or text.startswith("/mola369"):
-        raise SkipHandler
-    # kilitliyse sessizce yut
-    if IS_LOCKED:
-        return
-    # değilse diğer handlerlara geç
-    raise SkipHandler
-
-@router.callback_query()
-async def gate_callbacks(cb: CallbackQuery):
-    # callback'lerde kilitliyse kullanıcıyı uyar; değilse diğer callback handlerlara geç
-    if IS_LOCKED:
-        try:
-            await cb.answer("Bot şu an molada. /yoladevam yaz.", show_alert=True)
-        except Exception:
-            await cb.answer()
-        return
-    raise SkipHandler
 
 # ---------- Komutlar ----------
 @router.message(CommandStart())
@@ -496,13 +454,24 @@ async def open_ticket_simple(cb: CallbackQuery, bot: Bot):
             logging.warning(f"Ticket bildirimi gönderilemedi: {e}")
     await cb.answer("Talebin iletildi. Ekip seninle iletişime geçecek.")
 
+# ---------- KİLİT FİLTRELERİ (en sonda) ----------
+@router.message(lambda m: IS_LOCKED and not ((m.text or '').startswith('/yoladevam') or (m.text or '').startswith('/mola369')))
+async def locked_block_messages(msg: Message):
+    return
+
+@router.callback_query(lambda c: IS_LOCKED)
+async def locked_block_callbacks(cb: CallbackQuery):
+    try:
+        await cb.answer("Bot şu an molada. /yoladevam yaz.", show_alert=True)
+    except Exception:
+        await cb.answer()
+
 # ---------- Main ----------
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("BOT_TOKEN ortam değişkeni ayarlı değil.")
-    # aiogram 3.7+ uyumu: parse_mode doğrudan verilmez, DefaultBotProperties kullanılır
     bot = Bot(token, default=DefaultBotProperties(parse_mode="Markdown"))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
@@ -517,5 +486,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("MushBot durduruldu.")
-    except Exception as e:
-        print(f"MushBot kritik hata: {e}")
+
