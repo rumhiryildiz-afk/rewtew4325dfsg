@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MushBot – tek dosya Telegram botu (aiogram v3, 3.7+ uyumlu)
+MushBot — tek dosya Telegram botu (aiogram v3, 3.7+ uyumlu)
 
-Değişiklik: Bot(...) init içinde parse_mode yerine
-DefaultBotProperties(parse_mode="Markdown") kullanıldı.
+KULLANIM:
+- Ortam değişkenleri:
+    BOT_TOKEN (zorunlu)
+    CRYPTO_ADDRESS (zorunlu)
+    NOTIFY_CHANNEL_INTERACTIONS_ID (ör: -100...)
+    NOTIFY_CHANNEL_PAYMENTS_ID (ör: -100...)
+    KATALOG_IMAGE_FILE_ID / KATALOG_IMAGE_URL (opsiyonel)
+
+- Start: python bot.py
+- requirements.txt: aiogram==3.*
 """
 
 import asyncio
@@ -16,44 +24,66 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import SkipHandler
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.client.default import DefaultBotProperties
 
-# ---------- Dosya yolları ----------
+# ---------- Veri dosyası ----------
 DATA_FILE = Path("products.json")
 
-# ---------- Runtime durum ----------
-IS_LOCKED = False   # /mola369 -> True, /yoladevam -> False
+# ---------- Global durum ----------
+IS_LOCKED = False
 router = Router()
 started_users: Set[int] = set()
 ORDERS: Dict[str, Dict[str, Any]] = {}
 
-# ---------- Ürün veri yükleme ----------
+# ---------- Ürün yükleme / kaydetme ----------
 def load_products() -> List[Dict[str, Any]]:
     if DATA_FILE.exists():
         try:
             return json.loads(DATA_FILE.read_text(encoding="utf-8"))
         except Exception as e:
-            logging.warning(f"products.json okunamadı ({e}), placeholder kullanılacak.")
+            logging.warning(f"products.json okunamadı ({e}), varsayılan kullanılacak.")
+    # Varsayılan ürünler
     return [
-        {"id": "mikrodoz", "name": "Mikrodoz Kapsül", "price": "Fiyat: (doldurulacak)",
-         "desc": "💊 Günlük denge, odak ve huzur.\n🌿 Düşük dozlu form; berraklık ve sakinlik.\n🧠 Yaratıcılığı destekleyebilir.",
-         "photo": None},
-        {"id": "pinkbuf", "name": "Pink Buffalo", "price": "Fiyat: (doldurulacak)",
-         "desc": "🐃 Kökenine özgü karakteristik deneyimler.\n🌈 Yoğun görseller, derin farkındalık.",
-         "photo": None},
-        {"id": "goldtea", "name": "Golden Teacher", "price": "Fiyat: (doldurulacak)",
-         "desc": "👁️ Klasik, ‘öğretici’ profil.\n🕊️ İçsel yolculuk ve farkındalık odaklı.",
-         "photo": None},
-        {"id": "choc", "name": "Mantar Çikolata", "price": "Fiyat: (doldurulacak)",
-         "desc": "🍫 %90 bitter taban; dengeleyici bileşenlerle hazırlanmış keyifli tüketim formu.",
-         "photo": None},
+        {
+            "id": "mikrodoz",
+            "name": "Mikrodoz Kapsül",
+            "price": "Fiyat: (doldurulacak)",
+            "desc": "💊 Günlük denge, odak ve huzur.\n🌿 Düşük dozlu form; berraklık ve sakinlik.\n🧠 Yaratıcılığı destekleyebilir.",
+            "photo": None,
+        },
+        {
+            "id": "pinkbuf",
+            "name": "Pink Buffalo",
+            "price": "Fiyat: (doldurulacak)",
+            "desc": "🐃 Kökenine özgü karakteristik deneyimler.\n🌈 Yoğun görseller, derin farkındalık.",
+            "photo": None,
+        },
+        {
+            "id": "goldtea",
+            "name": "Golden Teacher",
+            "price": "Fiyat: (doldurulacak)",
+            "desc": "👁️ Klasik, ‘öğretici’ profil.\n🕊️ İçsel yolculuk ve farkındalık odaklı.",
+            "photo": None,
+        },
+        {
+            "id": "choc",
+            "name": "Mantar Çikolata",
+            "price": "Fiyat: (doldurulacak)",
+            "desc": (
+                "🍫 %90 bitter taban; Reishi ve takviye bileşenleriyle dengelenmiş bir form.\n"
+                "Her kare sakinleştirici ve farkındalığı tetikleyen bir deneyim sunabilir."
+            ),
+            "photo": None,
+        },
     ]
+
 
 def save_products(products: List[Dict[str, Any]]) -> None:
     try:
@@ -61,13 +91,14 @@ def save_products(products: List[Dict[str, Any]]) -> None:
     except Exception as e:
         logging.error(f"products.json yazılamadı: {e}")
 
+
 PRODUCTS: List[Dict[str, Any]] = load_products()
 
-# ---------- Opsiyonel katalog görseli ----------
+# ---------- Katalog görsel kaynakları (ENV) ----------
 CATALOG_FILE_ID: Optional[str] = os.getenv("KATALOG_IMAGE_FILE_ID")
 CATALOG_IMAGE_URL: Optional[str] = os.getenv("KATALOG_IMAGE_URL")
 
-# ---------- Sabitler / Callback ID’leri ----------
+# ---------- Sabitler ----------
 BTN_ENTER = "MushBot’un renkli dünyasına giriş yap 🎭"
 BTN_CITY_IST = "🏙️ İstanbul"
 BTN_CATALOG = "🗂️ Katalog"
@@ -84,18 +115,18 @@ CB_PAID_PREFIX = "paid:"
 CB_ADMIN_OK_PREFIX = "admin_ok:"
 CB_ADMIN_NO_PREFIX = "admin_no:"
 
-# Geri butonları
+# Geri buton callbackleri
 CB_BACK_ENTER = "back_enter"
 CB_BACK_CITY = "back_city"
 CB_BACK_MENU = "back_menu"
 CB_BACK_SHOP = "back_shop"
 CB_BACK_DETAIL = "back_detail"
 
-# ---------- FSM durumları ----------
+# ---------- FSM ----------
 class ExpectReceipt(StatesGroup):
     waiting = State()
 
-# ---------- Yardımcılar ----------
+# ---------- Yardımcı fonksiyonlar ----------
 def get_crypto_address() -> str:
     return os.getenv("CRYPTO_ADDRESS", "(CRYPTO_ADDRESS ortam değişkenini ayarlayın)")
 
@@ -152,21 +183,35 @@ def kb_payment(prod_id: str) -> InlineKeyboardMarkup:
     kb.adjust(1)
     return kb.as_markup()
 
-# ---------- KİLİT KAPISI ----------
+# ---------- Global gate (düzeltildi: SkipHandler kullanılıyor) ----------
 @router.message()
 async def gate_messages(msg: Message):
-    global IS_LOCKED
+    """
+    Bu handler aiogram'ın önceki davranışına göre 'first match wins' etkisi
+    gösterebilir; bu yüzden burada yalnızca kilit (IS_LOCKED) kontrolü yaparız.
+    Eğer komut /yoladevam veya /mola369 ise SkipHandler fırlatılır ki
+    diğer handler'lar çalışsın. Kilitliyken diğer mesajlar sessizce yutulur.
+    """
     text = (msg.text or "").strip()
+    # bu iki komut diğer handlerlara geçsin
     if text.startswith("/yoladevam") or text.startswith("/mola369"):
-        return
+        raise SkipHandler
+    # kilitliyse sessizce yut
     if IS_LOCKED:
         return
+    # değilse diğer handlerlara geç
+    raise SkipHandler
 
 @router.callback_query()
 async def gate_callbacks(cb: CallbackQuery):
+    # callback'lerde kilitliyse kullanıcıyı uyar; değilse diğer callback handlerlara geç
     if IS_LOCKED:
-        await cb.answer()
+        try:
+            await cb.answer("Bot şu an molada. /yoladevam yaz.", show_alert=True)
+        except Exception:
+            await cb.answer()
         return
+    raise SkipHandler
 
 # ---------- Komutlar ----------
 @router.message(CommandStart())
@@ -200,6 +245,7 @@ async def ping(msg: Message):
 async def debug(msg: Message):
     await msg.answer(f"uid={msg.from_user.id}\nchat={msg.chat.id}")
 
+# Kilit komutları (şifresiz)
 @router.message(F.text.regexp(r"^/mola369$"))
 async def cmd_lock(msg: Message):
     global IS_LOCKED
@@ -212,7 +258,7 @@ async def cmd_unlock(msg: Message):
     IS_LOCKED = False
     await msg.reply("✅ Bot tekrar aktif.", parse_mode="Markdown")
 
-# ---------- Akış Callback’leri ----------
+# ---------- Akış callback'leri ----------
 @router.callback_query(F.data == CB_ENTER)
 async def on_enter(cb: CallbackQuery):
     await cb.message.edit_text("Lütfen bulunduğun şehri seç 💫", reply_markup=kb_city())
@@ -286,9 +332,7 @@ async def on_product_detail(cb: CallbackQuery):
     await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb_payment(pid))
     await cb.answer()
 
-class ExpectReceipt(StatesGroup):
-    waiting = State()
-
+# ---------- Ödeme bildirimi (dekont) ----------
 @router.callback_query(F.data.startswith(CB_PAID_PREFIX))
 async def on_paid_clicked(cb: CallbackQuery, state: FSMContext):
     pid = cb.data.split(":", 1)[1]
@@ -378,6 +422,7 @@ async def on_receipt(msg: Message, state: FSMContext, bot: Bot):
     await msg.answer("✅ Dekont alındı.\n" f"Sipariş No: {order_id}\n" "Manuel kontrol sonrası bilgilendirileceksiniz.")
     await state.clear()
 
+# ---------- Admin onay / red ----------
 @router.callback_query(F.data.startswith(CB_ADMIN_OK_PREFIX))
 async def admin_ok(cb: CallbackQuery, bot: Bot):
     order_id = cb.data.split(":", 1)[1]
@@ -420,17 +465,19 @@ async def admin_no(cb: CallbackQuery, bot: Bot):
         pass
     await cb.answer("Reddedildi.")
 
+# ---------- Katalog yükleme ----------
 @router.message(F.text == "/katalog_yukle")
 async def catalog_upload_start(msg: Message):
-    await msg.answer("📸 Katalog fotoğrafını bu sohbete gönder. Gönderince file_id kaydedilecek; kalıcı olması için ENV’e ekleyin.")
+    await msg.answer("📸 Katalog fotoğrafını bu sohbete gönder. Gönderince file_id kaydedilecek; kalıcı olması için ENV'e ekleyin.")
 
 @router.message(F.photo)
 async def catalog_photo(msg: Message):
     global CATALOG_FILE_ID
     photo = msg.photo[-1]
     CATALOG_FILE_ID = photo.file_id
-    await msg.answer(f"✅ Katalog görseli kaydedildi.\nfile_id: `{CATALOG_FILE_ID}`\nENV’e kaydetmeyi unutmayın.", parse_mode="Markdown")
+    await msg.answer(f"✅ Katalog görseli kaydedildi.\nfile_id: `{CATALOG_FILE_ID}`\nENV'e kaydetmeyi unutmayın.", parse_mode="Markdown")
 
+# ---------- Basit ticket ----------
 @router.callback_query(F.data == CB_OPEN_TICKET_SIMPLE)
 async def open_ticket_simple(cb: CallbackQuery, bot: Bot):
     pay_ch = os.getenv("NOTIFY_CHANNEL_PAYMENTS_ID")
@@ -449,11 +496,13 @@ async def open_ticket_simple(cb: CallbackQuery, bot: Bot):
             logging.warning(f"Ticket bildirimi gönderilemedi: {e}")
     await cb.answer("Talebin iletildi. Ekip seninle iletişime geçecek.")
 
+# ---------- Main ----------
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("BOT_TOKEN ortam değişkeni ayarlı değil.")
+    # aiogram 3.7+ uyumu: parse_mode doğrudan verilmez, DefaultBotProperties kullanılır
     bot = Bot(token, default=DefaultBotProperties(parse_mode="Markdown"))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
@@ -468,3 +517,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("MushBot durduruldu.")
+    except Exception as e:
+        print(f"MushBot kritik hata: {e}")
