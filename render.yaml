@@ -2,5 +2,9 @@ services:
   - type: worker
     name: mushbot
     env: python
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.8"
