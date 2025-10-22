@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Mantar Madeni – Genel Mağaza Botu (aiogram v3.7+)
-Bu sürümde onay mesajına şu satır eklendi:
-🕒 Teslimat bilgileri 24 saat içinde konumla birlikte iletilecektir.
+"""Mantar Madeni — Çalıştırmaya hazır tek dosya (aiogram v3.7+)
+
+Kullanım:
+- Ortam değişkenleri: BOT_TOKEN, CRYPTO_ADDRESS, NOTIFY_CHANNEL_PAYMENTS_ID
+- Başlatma: python bot.py
 """
 
 import asyncio
@@ -26,15 +27,22 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+# --- Konfig ---
 DATA_FILE = Path("products.json")
 IS_LOCKED = False
 router = Router()
 started_users: Set[int] = set()
 ORDERS: Dict[str, Dict[str, Any]] = {}
 
+# Default admin id set (gerekirse ENV'den ekleyin)
 DEFAULT_ADMIN_IDS = {8128551234}
 ENV_ADMIN = os.getenv("ADMIN_IDS", "")
-ADMIN_IDS = set(DEFAULT_ADMIN_IDS) | {int(x.strip()) for x in ENV_ADMIN.split(",") if x.strip().isdigit()}
+ADMIN_IDS: Set[int] = set(DEFAULT_ADMIN_IDS)
+if ENV_ADMIN:
+    for part in ENV_ADMIN.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ADMIN_IDS.add(int(part))
 
 CATALOG_FILE_ID: Optional[str] = os.getenv("KATALOG_IMAGE_FILE_ID")
 CATALOG_IMAGE_URL: Optional[str] = os.getenv("KATALOG_IMAGE_URL")
@@ -61,13 +69,14 @@ CB_BACK_MENU = "back_menu"
 CB_BACK_SHOP = "back_shop"
 CB_BACK_DETAIL = "back_detail"
 
-TRX_TAMPON_ORANI = 0.015
+TRX_TAMPON_ORANI = 0.015  # %1.5 tampon
 
-PRODUCT_TEMPLATES: Dict[int, Dict[str, str]] = {
-    1: {"name": "Mikrodoz Kapsül", "desc": "💊 Günlük denge, odak ve huzur.\n🌿 Dengeli içerik; berraklık ve sakinlik.\n🧠 Yaratıcılığı destekleyebilir.", "unit_hint": "kutu/adet"},
-    2: {"name": "Pink Buffalo", "desc": "🐃 Karakteristik bir profil.\n🌈 Yoğun görsel ve farkındalık odaklı deneyim.", "unit_hint": "1gr/2gr"},
-    3: {"name": "Golden Teacher", "desc": "👁️ Klasik ve ‘öğretici’ profil.\n🕊️ İçsel yolculuk ve nazik ama derin etki.", "unit_hint": "1gr/2gr"},
-    4: {"name": "Mantar Çikolata", "desc": "🍫 Bitter taban; dengeli bir form.\n✨ Her kare sakinlik ve farkındalık anları sunabilir.", "unit_hint": "1bar/2bar"},
+# Ürün şablonları (template_id ile referans)
+PRODUCT_TEMPLATES = {
+    1: {"name": "Mikrodoz Kapsül", "desc": "💊 Günlük denge, odak ve huzur.\n🌿 Dengeli içerik; berraklık ve sakinlik.", "unit_hint": "kutu"},
+    2: {"name": "Pink Buffalo", "desc": "🐃 Karakteristik bir profil.\n🌈 Yoğun görsel ve farkındalık odaklı deneyim.", "unit_hint": "gr"},
+    3: {"name": "Golden Teacher", "desc": "👁️ Klasik ve ‘öğretici’ profil.\n🕊️ İçsel yolculuk ve nazik ama derin etki.", "unit_hint": "gr"},
+    4: {"name": "Mantar Çikolata", "desc": "🍫 Bitter taban; dengeli bir form.\n✨ Her kare sakinlik ve farkındalık anları sunabilir.", "unit_hint": "bar"},
 }
 
 @dataclass
@@ -155,6 +164,7 @@ async def calc_trx_amount(price_tl: int) -> Dict[str, Any]:
 class ExpectReceipt(StatesGroup):
     waiting = State()
 
+# --- Klavye oluşturucular ---
 def kb_enter() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=BTN_ENTER, callback_data=CB_ENTER)
@@ -201,8 +211,9 @@ def kb_payment(listing_id: str) -> InlineKeyboardMarkup:
     kb.adjust(1)
     return kb.as_markup()
 
+# --- Komutlar ve callback'ler ---
 @router.message(CommandStart())
-async def on_start(msg: Message, bot: Bot):
+async def on_start(msg: Message):
     if IS_LOCKED:
         return
     welcome = "👋 Mantar Madeni’ne hoş geldin!\n\nAşağıdaki butona dokunarak başlayabilirsin."
@@ -225,6 +236,7 @@ async def debug(msg: Message):
 async def cmd_lock(msg: Message):
     global IS_LOCKED
     IS_LOCKED = True
+    await msg.reply("Bot devre dışı bırakıldı.")
 
 @router.message(F.text.regexp(r"^/yoladevam$"))
 async def cmd_unlock(msg: Message):
@@ -232,6 +244,7 @@ async def cmd_unlock(msg: Message):
         return
     global IS_LOCKED
     IS_LOCKED = False
+    await msg.reply("Bot tekrar aktif edildi.")
 
 @router.callback_query(F.data == CB_ENTER)
 async def on_enter(cb: CallbackQuery):
@@ -335,9 +348,6 @@ async def on_product_detail(cb: CallbackQuery):
     )
     await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb_payment(it.listing_id))
     await cb.answer()
-
-class ExpectReceipt(StatesGroup):
-    waiting = State()
 
 @router.callback_query(F.data.startswith(CB_PAID_PREFIX))
 async def on_paid_clicked(cb: CallbackQuery, state: FSMContext):
@@ -532,11 +542,12 @@ async def add_item(msg: Message):
     if not is_admin(msg.from_user.id):
         return
     text = (msg.text or "").strip()
+    # Beklenen format: /ekle{template}_{location}_{unit}_{price}
     m = re.fullmatch(r"/ekle([1-4])_([^_]+)_([^_]+)_([0-9]+)", text)
     if not m:
         return
     template_id = int(m.group(1))
-    location = m.group(2))
+    location = m.group(2)  # <- DÜZELTİLDİ
     unit = m.group(3)
     price_str = m.group(4)
     try:
