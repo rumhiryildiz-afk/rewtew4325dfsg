@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MushBot - tek dosya Telegram botu (aiogram v3, 3.7+ uyumlu)
+Mantar Madeni – Genel Mağaza Botu (aiogram v3.7+)
+Bu sürümde onay mesajına şu satır eklendi:
+🕒 Teslimat bilgileri 24 saat içinde konumla birlikte iletilecektir.
 """
 
 import asyncio
 import json
 import logging
 import os
-from datetime import datetime
+import re
+from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+import aiohttp
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart
@@ -21,73 +26,20 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# ---------- Veri dosyası ----------
 DATA_FILE = Path("products.json")
-
-# ---------- Global durum ----------
 IS_LOCKED = False
 router = Router()
 started_users: Set[int] = set()
 ORDERS: Dict[str, Dict[str, Any]] = {}
 
-# ---------- Ürün yükleme / kaydetme ----------
-def load_products() -> List[Dict[str, Any]]:
-    if DATA_FILE.exists():
-        try:
-            return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-        except Exception as e:
-            logging.warning(f"products.json okunamadı ({e}), varsayılan kullanılacak.")
-    # Varsayılan ürünler
-    return [
-        {
-            "id": "mikrodoz",
-            "name": "Mikrodoz Kapsül",
-            "price": "Fiyat: (doldurulacak)",
-            "desc": "💊 Günlük denge, odak ve huzur.\n🌿 Düşük dozlu form; berraklık ve sakinlik.\n🧠 Yaratıcılığı destekleyebilir.",
-            "photo": None,
-        },
-        {
-            "id": "pinkbuf",
-            "name": "Pink Buffalo",
-            "price": "Fiyat: (doldurulacak)",
-            "desc": "🐃 Kökenine özgü karakteristik deneyimler.\n🌈 Yoğun görseller, derin farkındalık.",
-            "photo": None,
-        },
-        {
-            "id": "goldtea",
-            "name": "Golden Teacher",
-            "price": "Fiyat: (doldurulacak)",
-            "desc": "👁️ Klasik, ‘öğretici’ profil.\n🕊️ İçsel yolculuk ve farkındalık odaklı.",
-            "photo": None,
-        },
-        {
-            "id": "choc",
-            "name": "Mantar Çikolata",
-            "price": "Fiyat: (doldurulacak)",
-            "desc": (
-                "🍫 %90 bitter taban; Reishi ve takviye bileşenleriyle dengelenmiş bir form.\n"
-                "Her kare sakinleştirici ve farkındalığı tetikleyen bir deneyim sunabilir."
-            ),
-            "photo": None,
-        },
-    ]
+DEFAULT_ADMIN_IDS = {8128551234}
+ENV_ADMIN = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = set(DEFAULT_ADMIN_IDS) | {int(x.strip()) for x in ENV_ADMIN.split(",") if x.strip().isdigit()}
 
-
-def save_products(products: List[Dict[str, Any]]) -> None:
-    try:
-        DATA_FILE.write_text(json.dumps(products, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:
-        logging.error(f"products.json yazılamadı: {e}")
-
-
-PRODUCTS: List[Dict[str, Any]] = load_products()
-
-# ---------- Katalog görsel kaynakları (ENV) ----------
 CATALOG_FILE_ID: Optional[str] = os.getenv("KATALOG_IMAGE_FILE_ID")
 CATALOG_IMAGE_URL: Optional[str] = os.getenv("KATALOG_IMAGE_URL")
 
-# ---------- Sabitler ----------
-BTN_ENTER = "MushBot’un renkli dünyasına giriş yap 🎭"
+BTN_ENTER = "Mantar Madeni’nin renkli dünyasına giriş yap 🎭"
 BTN_CITY_IST = "🏙️ İstanbul"
 BTN_CATALOG = "🗂️ Katalog"
 BTN_SHOP = "🛒 Alışverişe devam et"
@@ -103,34 +55,106 @@ CB_PAID_PREFIX = "paid:"
 CB_ADMIN_OK_PREFIX = "admin_ok:"
 CB_ADMIN_NO_PREFIX = "admin_no:"
 
-# Geri buton callbackleri
 CB_BACK_ENTER = "back_enter"
 CB_BACK_CITY = "back_city"
 CB_BACK_MENU = "back_menu"
 CB_BACK_SHOP = "back_shop"
 CB_BACK_DETAIL = "back_detail"
 
-# ---------- FSM ----------
-class ExpectReceipt(StatesGroup):
-    waiting = State()
+TRX_TAMPON_ORANI = 0.015
 
-# ---------- Yardımcı fonksiyonlar ----------
-def get_crypto_address() -> str:
-    return os.getenv("CRYPTO_ADDRESS", "(CRYPTO_ADDRESS ortam değişkenini ayarlayın)")
+PRODUCT_TEMPLATES: Dict[int, Dict[str, str]] = {
+    1: {"name": "Mikrodoz Kapsül", "desc": "💊 Günlük denge, odak ve huzur.\n🌿 Dengeli içerik; berraklık ve sakinlik.\n🧠 Yaratıcılığı destekleyebilir.", "unit_hint": "kutu/adet"},
+    2: {"name": "Pink Buffalo", "desc": "🐃 Karakteristik bir profil.\n🌈 Yoğun görsel ve farkındalık odaklı deneyim.", "unit_hint": "1gr/2gr"},
+    3: {"name": "Golden Teacher", "desc": "👁️ Klasik ve ‘öğretici’ profil.\n🕊️ İçsel yolculuk ve nazik ama derin etki.", "unit_hint": "1gr/2gr"},
+    4: {"name": "Mantar Çikolata", "desc": "🍫 Bitter taban; dengeli bir form.\n✨ Her kare sakinlik ve farkındalık anları sunabilir.", "unit_hint": "1bar/2bar"},
+}
 
-def find_product(pid: str) -> Optional[Dict[str, Any]]:
-    return next((p for p in PRODUCTS if p.get("id") == pid), None)
+@dataclass
+class Listing:
+    listing_id: str
+    template_id: int
+    unit: str
+    location: str
+    price_tl: int
+    created_at: str
+    product_name: str
+    product_desc: str
 
-def remove_product_by_id(pid: str) -> bool:
-    global PRODUCTS
-    before = len(PRODUCTS)
-    PRODUCTS = [p for p in PRODUCTS if p.get("id") != pid]
-    if len(PRODUCTS) != before:
-        save_products(PRODUCTS)
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def load_listings() -> List[Listing]:
+    if DATA_FILE.exists():
+        try:
+            raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+            return [Listing(**item) for item in raw]
+        except Exception as e:
+            logging.warning(f"products.json okunamadı ({e}); boş liste ile devam.")
+    return []
+
+def save_listings(items: List[Listing]) -> None:
+    tmp = DATA_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps([asdict(x) for x in items], ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(DATA_FILE)
+
+LISTINGS: List[Listing] = load_listings()
+
+def add_listing(item: Listing) -> None:
+    LISTINGS.append(item)
+    save_listings(LISTINGS)
+
+def remove_listing(listing_id: str) -> bool:
+    global LISTINGS
+    before = len(LISTINGS)
+    LISTINGS = [x for x in LISTINGS if x.listing_id != listing_id]
+    if len(LISTINGS) != before:
+        save_listings(LISTINGS)
         return True
     return False
 
-# ---------- Klavyeler ----------
+def find_listing(listing_id: str) -> Optional[Listing]:
+    for it in LISTINGS:
+        if it.listing_id == listing_id:
+            return it
+    return None
+
+async def fetch_trx_try_rate() -> Optional[float]:
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=tron&vs_currencies=try"
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    val = data.get("tron", {}).get("try")
+                    if isinstance(val, (int, float)) and val > 0:
+                        return float(val)
+    except Exception as e:
+        logging.warning(f"TRX kuru çekilemedi: {e}")
+    return None
+
+async def calc_trx_amount(price_tl: int) -> Dict[str, Any]:
+    rate = await fetch_trx_try_rate()
+    source = "live"
+    if rate is None:
+        env_rate = os.getenv("TRX_TRY_RATE")
+        if env_rate:
+            try:
+                rate = float(env_rate); source = "env"
+            except:
+                rate = None
+    if rate is None or rate <= 0:
+        return {"ok": False}
+    trx = price_tl / rate
+    trx *= (1 + TRX_TAMPON_ORANI)
+    trx_amt = f"{trx:.6f}"
+    return {"ok": True, "rate": rate, "rate_source": source, "trx_amount": trx_amt,
+            "ts": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")}
+
+class ExpectReceipt(StatesGroup):
+    waiting = State()
+
 def kb_enter() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=BTN_ENTER, callback_data=CB_ENTER)
@@ -153,92 +177,94 @@ def kb_menu() -> InlineKeyboardMarkup:
     kb.adjust(1)
     return kb.as_markup()
 
+def listing_button_text(it: Listing) -> str:
+    if it.template_id == 4:
+        return f"{it.product_name} — {it.location} ({it.price_tl} TL)"
+    unit = it.unit.replace("_", " ")
+    return f"{unit} {it.product_name} — {it.location} ({it.price_tl} TL)"
+
 def kb_products_list() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    if PRODUCTS:
-        for p in PRODUCTS:
-            kb.button(text=f"🛍️ {p['name']}", callback_data=f"{CB_PRODUCTS_PREFIX}{p['id']}")
+    if LISTINGS:
+        for it in LISTINGS:
+            kb.button(text=listing_button_text(it), callback_data=f"{CB_PRODUCTS_PREFIX}{it.listing_id}")
     else:
-        kb.button(text="(Stokta ürün yok)", callback_data="noop")
+        kb.button(text="(Şu an listede ürün yok)", callback_data="noop")
     kb.button(text="⬅️ Geri", callback_data=CB_BACK_MENU)
     kb.adjust(1)
     return kb.as_markup()
 
-def kb_payment(prod_id: str) -> InlineKeyboardMarkup:
+def kb_payment(listing_id: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Ödeme yaptım", callback_data=f"{CB_PAID_PREFIX}{prod_id}")
+    kb.button(text="✅ Ödeme yaptım", callback_data=f"{CB_PAID_PREFIX}{listing_id}")
     kb.button(text="⬅️ Geri", callback_data=CB_BACK_SHOP)
     kb.adjust(1)
     return kb.as_markup()
 
-# ---------- Komutlar ----------
 @router.message(CommandStart())
 async def on_start(msg: Message, bot: Bot):
-    welcome = "👋 *MushBot* burada!\n\nAşağıdaki butona dokunarak başlayabilirsin."
-    await msg.answer(welcome, parse_mode="Markdown", reply_markup=kb_enter())
-
-    uid = msg.from_user.id
-    if uid not in started_users:
-        started_users.add(uid)
-        ch = os.getenv("NOTIFY_CHANNEL_INTERACTIONS_ID")
-        if ch:
-            try:
-                ch_id = int(ch)
-                u = msg.from_user
-                info = (
-                    "👤 *Yeni kullanıcı etkileşimi!*\n\n"
-                    f"🆔 ID: `{u.id}`\n"
-                    f"🪪 Ad: {u.full_name} (@{u.username or '-'})\n"
-                    f"🕒 Zaman (UTC): {datetime.utcnow().isoformat()}"
-                )
-                await bot.send_message(ch_id, info, parse_mode="Markdown")
-            except Exception as e:
-                logging.warning(f"[start notify] gönderilemedi: {e}")
+    if IS_LOCKED:
+        return
+    welcome = "👋 Mantar Madeni’ne hoş geldin!\n\nAşağıdaki butona dokunarak başlayabilirsin."
+    await msg.answer(welcome, reply_markup=kb_enter())
+    started_users.add(msg.from_user.id)
 
 @router.message(F.text == "/ping")
 async def ping(msg: Message):
+    if IS_LOCKED:
+        return
     await msg.answer("pong")
 
 @router.message(F.text == "/debug")
 async def debug(msg: Message):
+    if IS_LOCKED:
+        return
     await msg.answer(f"uid={msg.from_user.id}\nchat={msg.chat.id}")
 
-# Kilit komutları (şifresiz)
 @router.message(F.text.regexp(r"^/mola369$"))
 async def cmd_lock(msg: Message):
     global IS_LOCKED
     IS_LOCKED = True
-    await msg.reply("🔒 Bot kilitlendi. Yalnızca `/yoladevam` komutu çalışır.", parse_mode="Markdown")
 
 @router.message(F.text.regexp(r"^/yoladevam$"))
 async def cmd_unlock(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
     global IS_LOCKED
     IS_LOCKED = False
-    await msg.reply("✅ Bot tekrar aktif.", parse_mode="Markdown")
 
-# ---------- Akış callback'leri ----------
 @router.callback_query(F.data == CB_ENTER)
 async def on_enter(cb: CallbackQuery):
+    if IS_LOCKED:
+        return
     await cb.message.edit_text("Lütfen bulunduğun şehri seç 💫", reply_markup=kb_city())
     await cb.answer()
 
 @router.callback_query(F.data == CB_BACK_ENTER)
 async def back_enter(cb: CallbackQuery):
-    await cb.message.edit_text("👋 *MushBot* burada!\n\nAşağıdaki butona dokunarak başlayabilirsin.", parse_mode="Markdown", reply_markup=kb_enter())
+    if IS_LOCKED:
+        return
+    await cb.message.edit_text("👋 Mantar Madeni’ne hoş geldin!\n\nAşağıdaki butona dokunarak başlayabilirsin.", reply_markup=kb_enter())
     await cb.answer()
 
 @router.callback_query(F.data == CB_CITY_IST)
 async def on_city(cb: CallbackQuery):
+    if IS_LOCKED:
+        return
     await cb.message.edit_text("📍 Şehir: *İstanbul*\n\nNe yapmak istersin?", parse_mode="Markdown", reply_markup=kb_menu())
     await cb.answer()
 
 @router.callback_query(F.data == CB_BACK_CITY)
 async def back_city(cb: CallbackQuery):
+    if IS_LOCKED:
+        return
     await cb.message.edit_text("Lütfen bulunduğun şehri seç 💫", reply_markup=kb_city())
     await cb.answer()
 
 @router.callback_query(F.data == CB_SHOW_CATALOG)
 async def on_show_catalog(cb: CallbackQuery, bot: Bot):
+    if IS_LOCKED:
+        return
     if CATALOG_FILE_ID:
         await bot.send_photo(cb.message.chat.id, CATALOG_FILE_ID, caption="🗂️ Katalog")
     elif CATALOG_IMAGE_URL:
@@ -253,52 +279,76 @@ async def on_show_catalog(cb: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data == CB_BACK_MENU)
 async def back_menu(cb: CallbackQuery):
+    if IS_LOCKED:
+        return
     await cb.message.edit_text("📍 Şehir: *İstanbul*\n\nNe yapmak istersin?", parse_mode="Markdown", reply_markup=kb_menu())
     await cb.answer()
 
 @router.callback_query(F.data == CB_SHOW_SHOP)
 async def on_show_shop(cb: CallbackQuery):
+    if IS_LOCKED:
+        return
     await cb.message.edit_text("🛍️ *Ürünler*\n\nBir ürün seçin:", parse_mode="Markdown", reply_markup=kb_products_list())
     await cb.answer()
 
 @router.callback_query(F.data == CB_BACK_SHOP)
 async def back_shop(cb: CallbackQuery):
+    if IS_LOCKED:
+        return
     await cb.message.edit_text("🛍️ *Ürünler*\n\nBir ürün seçin:", parse_mode="Markdown", reply_markup=kb_products_list())
     await cb.answer()
 
 @router.callback_query(F.data.startswith(CB_PRODUCTS_PREFIX))
 async def on_product_detail(cb: CallbackQuery):
-    pid = cb.data.split(":", 1)[1]
-    prod = find_product(pid)
-    if not prod:
+    if IS_LOCKED:
+        return
+    listing_id = cb.data.split(":", 1)[1]
+    it = find_listing(listing_id)
+    if not it:
         await cb.answer("Ürün bulunamadı / stokta yok", show_alert=True)
         return
-    addr = get_crypto_address()
+
+    trx_info = await calc_trx_amount(it.price_tl)
+    trx_block = ""
+    if trx_info.get("ok"):
+        trx_block = (
+            f"\n🔄 Anlık kur: 1 TRX ≈ ₺{trx_info['rate']:.2f} ({trx_info['rate_source']})"
+            f"\n📊 Gönderilecek miktar: ≈{trx_info['trx_amount']} TRX"
+            f"\n🕒 Kur zamanı: {trx_info['ts']}\n"
+        )
+
+    addr = os.getenv("CRYPTO_ADDRESS", "(CRYPTO_ADDRESS ortam değişkenini ayarlayın)")
+    title = f"{it.product_name} — {it.location}"
+    if it.template_id != 4:
+        title = f"{it.unit} {title}"
+
     text = (
-        f"*{prod['name']}*\n"
-        f"{prod['price']}\n\n"
-        f"{prod['desc']}\n\n"
-        "*Ödeme yöntemi: Sadece KRİPTO*\n"
-        "Aşağıdaki cüzdan adresine tutarı gönderin, sonra *Ödeme yaptım* butonuna basın.\n\n"
+        f"*{title}*\n"
+        f"💰 Fiyat: {it.price_tl} TL"
+        f"{trx_block}\n"
+        f"{it.product_desc}\n\n"
+        "💸 *Ödeme yöntemi: Sadece KRİPTO*\n"
         "Cüzdan Adresi:\n"
         "```\n"
         f"{addr}\n"
         "```\n"
     )
-    if prod.get("photo"):
-        await cb.message.answer_photo(prod["photo"], caption=prod["name"])
-    await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb_payment(pid))
+    await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb_payment(it.listing_id))
     await cb.answer()
 
-# ---------- Ödeme bildirimi (dekont) ----------
+class ExpectReceipt(StatesGroup):
+    waiting = State()
+
 @router.callback_query(F.data.startswith(CB_PAID_PREFIX))
 async def on_paid_clicked(cb: CallbackQuery, state: FSMContext):
-    pid = cb.data.split(":", 1)[1]
-    prod = find_product(pid)
-    if not prod:
+    if IS_LOCKED:
+        return
+    listing_id = cb.data.split(":", 1)[1]
+    it = find_listing(listing_id)
+    if not it:
         await cb.answer("Ürün bulunamadı / stokta yok", show_alert=True)
         return
-    await state.update_data(selected_product=prod)
+    await state.update_data(listing_id=listing_id)
     await state.set_state(ExpectReceipt.waiting)
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Geri", callback_data=CB_BACK_DETAIL)
@@ -312,61 +362,85 @@ async def on_paid_clicked(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == CB_BACK_DETAIL)
 async def back_detail(cb: CallbackQuery, state: FSMContext):
+    if IS_LOCKED:
+        return
     data = await state.get_data()
-    prod = data.get("selected_product")
+    listing_id = data.get("listing_id")
     await state.clear()
-    if prod and find_product(prod.get("id")):
-        pid = prod["id"]
-        addr = get_crypto_address()
+    it = find_listing(listing_id) if listing_id else None
+    if it:
+        trx_info = await calc_trx_amount(it.price_tl)
+        trx_block = ""
+        if trx_info.get("ok"):
+            trx_block = (
+                f"\n🔄 Anlık kur: 1 TRX ≈ ₺{trx_info['rate']:.2f} ({trx_info['rate_source']})"
+                f"\n📊 Gönderilecek miktar: ≈{trx_info['trx_amount']} TRX"
+                f"\n🕒 Kur zamanı: {trx_info['ts']}\n"
+            )
+        addr = os.getenv("CRYPTO_ADDRESS", "(CRYPTO_ADDRESS ayarlanmalı)")
+        title = f"{it.product_name} — {it.location}"
+        if it.template_id != 4:
+            title = f"{it.unit} {title}"
         text = (
-            f"*{prod['name']}*\n"
-            f"{prod['price']}\n\n"
-            f"{prod['desc']}\n\n"
-            "*Ödeme yöntemi: Sadece KRİPTO*\n"
-            "Aşağıdaki cüzdan adresine tutarı gönderin, sonra *Ödeme yaptım* butonuna basın.\n\n"
+            f"*{title}*\n"
+            f"💰 Fiyat: {it.price_tl} TL"
+            f"{trx_block}\n"
+            f"{it.product_desc}\n\n"
+            "💸 *Ödeme yöntemi: Sadece KRİPTO*\n"
             "Cüzdan Adresi:\n"
             "```\n"
             f"{addr}\n"
             "```\n"
         )
-        await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb_payment(pid))
+        await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb_payment(it.listing_id))
     else:
         await cb.message.edit_text("🛍️ *Ürünler*\n\nBir ürün seçin:", parse_mode="Markdown", reply_markup=kb_products_list())
     await cb.answer()
 
 @router.message(ExpectReceipt.waiting, F.photo | F.document | F.text)
 async def on_receipt(msg: Message, state: FSMContext, bot: Bot):
+    if IS_LOCKED:
+        return
     data = await state.get_data()
-    prod = data.get("selected_product", {"id": "?", "name": "?"})
-    pay_ch = os.getenv("NOTIFY_CHANNEL_PAYMENTS_ID")
-    if not pay_ch:
-        await msg.answer("Dekont alındı ama yönlendirme yapılamadı: NOTIFY_CHANNEL_PAYMENTS_ID ayarlı değil.")
+    listing_id = data.get("listing_id")
+    it = find_listing(listing_id) if listing_id else None
+    if not it:
         await state.clear()
         return
+
+    pay_ch = os.getenv("NOTIFY_CHANNEL_PAYMENTS_ID")
+    if not pay_ch:
+        await msg.answer("Dekont alındı; ancak yönetim kanalına iletilemedi (NOTIFY_CHANNEL_PAYMENTS_ID ayarlanmalı).")
+        await state.clear()
+        return
+
     try:
         pay_id = int(pay_ch)
     except ValueError:
         await msg.answer("NOTIFY_CHANNEL_PAYMENTS_ID sayısal olmalı.")
         await state.clear()
         return
+
     order_id = f"ORD-{int(datetime.utcnow().timestamp())}"
     user = msg.from_user
     ORDERS[order_id] = {
         "user_id": user.id,
         "username": user.username,
-        "product_id": prod.get("id"),
-        "product_name": prod.get("name"),
+        "listing_id": listing_id,
         "status": "PENDING",
         "created_at": datetime.utcnow().isoformat(),
     }
+
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Onayla", callback_data=f"{CB_ADMIN_OK_PREFIX}{order_id}")
     kb.button(text="❌ Reddet", callback_data=f"{CB_ADMIN_NO_PREFIX}{order_id}")
     kb.adjust(2)
+
     info = (
         "📣 *Yeni ödeme bildirimi*\n\n"
         f"Sipariş: `{order_id}`\n"
-        f"Ürün: *{prod.get('name')}* (id: `{prod.get('id')}`)\n"
+        f"İlân: `{listing_id}`\n"
+        f"Ürün: *{listing_button_text(it)}*\n"
         f"Kullanıcı: `{user.id}` @{user.username or '-'} {user.full_name}\n"
         f"Durum: *PENDING*\n"
         f"Tarih (UTC): {datetime.utcnow().isoformat()}\n"
@@ -377,67 +451,186 @@ async def on_receipt(msg: Message, state: FSMContext, bot: Bot):
         await bot.copy_message(chat_id=pay_id, from_chat_id=msg.chat.id, message_id=msg.message_id)
     except Exception as e:
         await bot.send_message(pay_id, f"[Hata] Dekont kopyalanamadı: {e}")
-    await msg.answer("✅ Dekont alındı.\n" f"Sipariş No: {order_id}\n" "Manuel kontrol sonrası bilgilendirileceksiniz.")
+
+    await msg.answer("✅ Dekont alındı.\nManuel kontrol sonrası bilgilendirileceksiniz.")
     await state.clear()
 
-# ---------- Admin onay / red ----------
 @router.callback_query(F.data.startswith(CB_ADMIN_OK_PREFIX))
 async def admin_ok(cb: CallbackQuery, bot: Bot):
+    if IS_LOCKED:
+        return
     order_id = cb.data.split(":", 1)[1]
     order = ORDERS.get(order_id)
     if not order:
         await cb.answer("Sipariş bulunamadı.", show_alert=True)
         return
-    order["status"] = "APPROVED"
-    pid = order.get("product_id")
-    removed = remove_product_by_id(pid) if pid else False
+
+    ORDERS[order_id]["status"] = "APPROVED"
+    listing_id = order.get("listing_id")
+    it = find_listing(listing_id) if listing_id else None
+
     try:
-        await bot.send_message(order["user_id"], f"🎉 Ödemeniz onaylandı!\nSipariş No: {order_id}")
+        await bot.send_message(
+            order["user_id"],
+            "🎉 Ödemen doğrulandı!\n\n"
+            f"Sipariş No: {order_id}\n"
+            f"Ürün: {listing_button_text(it) if it else listing_id}\n"
+            "Durum: ✅ Onaylandı\n"
+            "Teşekkürler, teslim süreci başlatıldı. 🍄\n"
+            "🕒 *Teslimat bilgileri 24 saat içinde konumla birlikte iletilecektir.*"
+        )
     except Exception:
         pass
-    repl = (cb.message.text or "").replace("Durum: *PENDING*", "Durum: *APPROVED*")
-    if removed:
-        repl += "\n\n🗑️ Ürün stoktan düşüldü."
+
+    new_text = (cb.message.text or "").replace("Durum: *PENDING*", "Durum: *APPROVED*")
     try:
-        await cb.message.edit_text(repl or "APPROVED", parse_mode="Markdown")
+        await cb.message.edit_text(new_text or "APPROVED", parse_mode="Markdown")
     except Exception:
         pass
-    await cb.answer("Onaylandı. Ürün stoktan düşüldü." if removed else "Onaylandı.")
+
+    if listing_id:
+        remove_listing(listing_id)
+
+    await cb.answer("Onaylandı.")
 
 @router.callback_query(F.data.startswith(CB_ADMIN_NO_PREFIX))
 async def admin_no(cb: CallbackQuery, bot: Bot):
+    if IS_LOCKED:
+        return
     order_id = cb.data.split(":", 1)[1]
     order = ORDERS.get(order_id)
     if not order:
         await cb.answer("Sipariş bulunamadı.", show_alert=True)
         return
-    order["status"] = "REJECTED"
+
+    ORDERS[order_id]["status"] = "REJECTED"
+
     try:
-        await bot.send_message(order["user_id"], f"❌ Ödemeniz doğrulanamadı / reddedildi.\nSipariş No: {order_id}")
+        await bot.send_message(
+            order["user_id"],
+            "❌ Ödemen doğrulanamadı / reddedildi.\n"
+            f"Sipariş No: {order_id}\n"
+            "Lütfen dekontu ve işlem bilgilerini kontrol ederek tekrar gönder."
+        )
     except Exception:
         pass
-    repl = (cb.message.text or "").replace("Durum: *PENDING*", "Durum: *REJECTED*")
+
+    new_text = (cb.message.text or "").replace("Durum: *PENDING*", "Durum: *REJECTED*")
     try:
-        await cb.message.edit_text(repl or "REJECTED", parse_mode="Markdown")
+        await cb.message.edit_text(new_text or "REJECTED", parse_mode="Markdown")
     except Exception:
         pass
     await cb.answer("Reddedildi.")
 
-# ---------- Katalog yükleme ----------
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+@router.message(F.text.startswith("/ekle"))
+async def add_item(msg: Message):
+    if IS_LOCKED:
+        return
+    if not is_admin(msg.from_user.id):
+        return
+    text = (msg.text or "").strip()
+    m = re.fullmatch(r"/ekle([1-4])_([^_]+)_([^_]+)_([0-9]+)", text)
+    if not m:
+        return
+    template_id = int(m.group(1))
+    location = m.group(2))
+    unit = m.group(3)
+    price_str = m.group(4)
+    try:
+        price_tl = int(price_str)
+    except ValueError:
+        return
+    tmpl = PRODUCT_TEMPLATES.get(template_id)
+    if not tmpl:
+        return
+    listing_id = f"L{template_id}-{int(datetime.utcnow().timestamp())}"
+    item = Listing(
+        listing_id=listing_id,
+        template_id=template_id,
+        unit=unit,
+        location=location.replace("-", " ").title(),
+        price_tl=price_tl,
+        created_at=now_utc_iso(),
+        product_name=tmpl["name"],
+        product_desc=tmpl["desc"],
+    )
+    add_listing(item)
+    await msg.reply(f"✅ Eklendi: {listing_button_text(item)}\n(id: `{listing_id}`)", parse_mode="Markdown")
+
+@router.message(F.text.regexp(r"^/duyuru_.+"))
+async def announce_text(msg: Message, bot: Bot):
+    if IS_LOCKED:
+        return
+    if not is_admin(msg.from_user.id):
+        return
+    content = msg.text.split("_", 1)[1].strip()
+    sent, errs = 0, 0
+    for uid in list(started_users):
+        try:
+            await bot.send_message(uid, content)
+            sent += 1
+            await asyncio.sleep(0.35)
+        except Exception:
+            errs += 1
+    await msg.reply(f"📣 Duyuru gönderildi: {sent} ok, {errs} hata.")
+
+@router.message(F.text == "/duyuru")
+async def announce_media_help(msg: Message):
+    if IS_LOCKED:
+        return
+    if not is_admin(msg.from_user.id):
+        return
+    await msg.reply("Bir *fotoğraf mesajına yanıt* olarak /duyuru yazarsan görsel olarak gönderirim.", parse_mode="Markdown")
+
+@router.message(F.reply_to_message, F.text == "/duyuru")
+async def announce_media(msg: Message, bot: Bot):
+    if IS_LOCKED:
+        return
+    if not is_admin(msg.from_user.id):
+        return
+    ref = msg.reply_to_message
+    sent, errs = 0, 0
+    for uid in list(started_users):
+        try:
+            if ref.photo:
+                ph = ref.photo[-1].file_id
+                await bot.send_photo(uid, ph, caption=(ref.caption or ""))
+            elif ref.document:
+                await bot.send_document(uid, ref.document.file_id, caption=(ref.caption or ""))
+            else:
+                await bot.send_message(uid, ref.text or "")
+            sent += 1
+            await asyncio.sleep(0.35)
+        except Exception:
+            errs += 1
+    await msg.reply(f"📣 Duyuru gönderildi: {sent} ok, {errs} hata.")
+
 @router.message(F.text == "/katalog_yukle")
 async def catalog_upload_start(msg: Message):
-    await msg.answer("📸 Katalog fotoğrafını bu sohbete gönder. Gönderince file_id kaydedilecek; kalıcı olması için ENV'e ekleyin.")
+    if IS_LOCKED:
+        return
+    if not is_admin(msg.from_user.id):
+        return
+    await msg.answer("📸 Katalog fotoğrafını bu sohbete gönder. Gönderince file_id'yi bildireceğim; istersen ENV'e ekleyip kalıcı yap.")
 
 @router.message(F.photo)
 async def catalog_photo(msg: Message):
+    if IS_LOCKED:
+        return
+    if not is_admin(msg.from_user.id):
+        return
     global CATALOG_FILE_ID
     photo = msg.photo[-1]
     CATALOG_FILE_ID = photo.file_id
-    await msg.answer(f"✅ Katalog görseli kaydedildi.\nfile_id: `{CATALOG_FILE_ID}`\nENV'e kaydetmeyi unutmayın.", parse_mode="Markdown")
+    await msg.answer(f"✅ Katalog görseli kaydedildi.\nfile_id: `{CATALOG_FILE_ID}`\nKalıcı yapmak için ENV'e `KATALOG_IMAGE_FILE_ID` olarak ekleyebilirsin.", parse_mode="Markdown")
 
-# ---------- Basit ticket ----------
 @router.callback_query(F.data == CB_OPEN_TICKET_SIMPLE)
 async def open_ticket_simple(cb: CallbackQuery, bot: Bot):
+    if IS_LOCKED:
+        return
     pay_ch = os.getenv("NOTIFY_CHANNEL_PAYMENTS_ID")
     if pay_ch:
         try:
@@ -452,21 +645,19 @@ async def open_ticket_simple(cb: CallbackQuery, bot: Bot):
             await bot.send_message(pay_id, text, parse_mode="Markdown")
         except Exception as e:
             logging.warning(f"Ticket bildirimi gönderilemedi: {e}")
-    await cb.answer("Talebin iletildi. Ekip seninle iletişime geçecek.")
+    await cb.answer("Talebin iletildi.")
 
-# ---------- KİLİT FİLTRELERİ (en sonda) ----------
-@router.message(lambda m: IS_LOCKED and not ((m.text or '').startswith('/yoladevam') or (m.text or '').startswith('/mola369')))
+@router.message(lambda m: IS_LOCKED)
 async def locked_block_messages(msg: Message):
     return
 
 @router.callback_query(lambda c: IS_LOCKED)
 async def locked_block_callbacks(cb: CallbackQuery):
     try:
-        await cb.answer("Bot şu an molada. /yoladevam yaz.", show_alert=True)
-    except Exception:
         await cb.answer()
+    except Exception:
+        pass
 
-# ---------- Main ----------
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     token = os.getenv("BOT_TOKEN")
@@ -478,12 +669,11 @@ async def main() -> None:
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
-        logging.warning(f"Webhook silme hatası: {e}")
+        logging.warning(f"Webhook silme: {e}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        print("MushBot durduruldu.")
-
+        print("Bot durduruldu.")
